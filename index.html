@@ -5276,5 +5276,178 @@ RULES FOR EVERY RESPONSE:
   window.speakBrowserFallback = (text, lang, onDone) => speakAdultMale(text, lang, speechRequestCounter, onDone);
 })();
 </script>
+  <script>
+(() => {
+  let maleTimer = null, startDelay = null;
+  window._activeUtter = null;
+  const EN_M = /\b(Aaron|Daniel|Alex|Arthur|Oliver|Gordon|Rishi|David|Mark|Guy|Ryan|Christopher|George|Reed|Rocko|Eddy|Fred)\b|UK English Male|\bMale\b/i;
+  const JP_M = /\b(Otoya|Hattori|Ichiro|Keita|Eddy)\b|\bMale\b/i;
+  const FEM  = /\b(Samantha|Karen|Moira|Tessa|Victoria|Nicky|Kyoko|O-Ren|Zira|Aria|Jenny|Shelley|Sandy|Flo|Kathy|Haruka|Nanami)\b|Female/i;
+
+  const cleanSpeech = (t) => (t || "").replace(/T\.?\s*Koi/gi, "Teacher Koi").replace(/\.{2,}/g, ", ").replace(/!{2,}/g, "!").replace(/\s+/g, " ").trim();
+
+  function pickMale(lang) {
+    const vs = window.speechSynthesis.getVoices() || [], pfx = (lang || "en").slice(0, 2).toLowerCase();
+    const list = vs.filter(v => v.lang.toLowerCase().startsWith(pfx));
+    const hit = list.find(v => (pfx === "ja" ? JP_M : EN_M).test(v.name) && !FEM.test(v.name));
+    if (hit) return { voice: hit, isMale: true };
+    return { voice: list.find(v => !FEM.test(v.name)) || list[0] || null, isMale: false };
+  }
+
+  const _origStop = window.stopAllSpeech;
+  window.stopAllSpeech = () => { clearTimeout(maleTimer); clearTimeout(startDelay); window._activeUtter = null; if (_origStop) _origStop(); };
+
+  function speakAdultMale(text, lang, tok, onDone) {
+    const clean = cleanSpeech(text);
+    if (!("speechSynthesis" in window) || !clean) { if (tok === speechRequestCounter && onDone) onDone(); return; }
+    try {
+      clearTimeout(maleTimer); clearTimeout(startDelay);
+      if (window.speechSynthesis.speaking || window.speechSynthesis.pending) window.speechSynthesis.cancel();
+      startDelay = setTimeout(() => {
+        if (tok !== speechRequestCounter) return;
+        let done = false;
+        const fin = () => { if (done) return; done = true; clearTimeout(maleTimer); window._activeUtter = null; setSpeakingVisual(false, false); if (!activeRecognition) document.getElementById("robotStatusText").textContent = "Ready! 🤖"; if (tok === speechRequestCounter && onDone) onDone(); };
+        const u = new SpeechSynthesisUtterance(clean); window._activeUtter = u;
+        u.lang = lang || "en-US";
+        u.rate = appState.speechSlow ? 0.72 : 0.88;
+        const p = pickMale(u.lang); if (p.voice) u.voice = p.voice;
+        u.pitch = p.isMale ? 0.90 : 0.72;
+        const maxMs = Math.max(7000, clean.length * (appState.speechSlow ? 300 : 220));
+        u.onstart = () => { setSpeakingVisual(true, true); clearTimeout(maleTimer); maleTimer = setTimeout(fin, maxMs); };
+        u.onend = fin; u.onerror = fin;
+        setSpeakingVisual(true, true);
+        maleTimer = setTimeout(fin, maxMs + 2000);
+        window.speechSynthesis.speak(u);
+      }, 75);
+    } catch (e) { setSpeakingVisual(false, false); if (tok === speechRequestCounter && onDone) onDone(); }
+  }
+
+  window.awardStars = (amount = 1, skip = false) => {
+    appState.stars += amount; appState.comboCount += amount; saveCustomData(); renderHud();
+    if (appState.comboCount >= 3) {
+      appState.comboCount %= 3; renderHud();
+      setTimeout(() => triggerCatchphrase("pizza", !isSpeakingNow), 500);
+    } else if (!skip) SFX.star();
+  };
+
+  window.playAudioBufferWithLipSync = (buf, tok, onDone = null) => {
+    const ctx = getAudioCtx();
+    if (!ctx || !buf || tok !== speechRequestCounter) { if (onDone) onDone(); return; }
+    let isRec = false;
+    try { for (const b of decodedCustomBuffers.values()) { if (b === buf) isRec = true; } } catch (e) {}
+    try {
+      if (ctx.state === "suspended") ctx.resume().catch(() => {});
+      const src = ctx.createBufferSource(); src.buffer = buf;
+      src.playbackRate.value = isRec ? 1.0 : (appState.speechSlow ? 0.88 : 0.98);
+      src.connect(voiceAnalyser); currentVoiceSource = src;
+      setSpeakingVisual(true, false); startRealTimeLipSync();
+      src.onended = () => {
+        if (currentVoiceSource === src) { currentVoiceSource = null; stopLipSyncLoop(); setSpeakingVisual(false, false); }
+        if (tok === speechRequestCounter && onDone) onDone();
+      };
+      src.start(ctx.currentTime + 0.045);
+    } catch (e) { currentVoiceSource = null; stopLipSyncLoop(); setSpeakingVisual(false, false); if (onDone) onDone(); }
+  };
+
+  if (window._rt) {
+    const rt = window._rt;
+    rt.speakLocal = speakAdultMale;
+    rt.ttsDir = (st) => st === "hype"
+      ? "Speak clearly, warmly, and joyfully in a deep adult male teacher voice, at an easy clear pace: "
+      : st === "silly" ? "Speak playfully and slowly in a funny adult male robot voice for a 6-year-old: "
+      : appState.speechSlow ? "Speak very slowly, warmly, and clearly in a deep adult male teacher voice, enunciating every word for a 6-year-old beginner: "
+      : "Speak warmly, clearly, and at a relaxed pace in an adult male English teacher voice: ";
+
+    rt.splitSents = (t) => {
+      const c = cleanSpeech(t);
+      if (!c) return [];
+      if (c.length <= 160) return [c];
+      return c.split(/([.!?。！？]+)\s+/).reduce((a, p, i) => { if (i % 2 === 0 && p.trim()) a.push(p.trim()); else if (i % 2 === 1 && a.length) a[a.length - 1] += p; return a; }, []);
+    };
+
+    const _origAuto = rt.autoReopenMic;
+    rt.autoReopenMic = () => setTimeout(() => { if (_origAuto) _origAuto(); }, 550);
+
+    async function streamSlow(text, st, tok, onDone) {
+      const key = rt.getKey(), ctx = getAudioCtx(); if (!key || !ctx) return false;
+      const ck = rt.ckOf(text, st);
+      if (ttsAudioCache.has(ck)) { playAudioBufferWithLipSync(ttsAudioCache.get(ck), tok, onDone); return true; }
+      if (rt.inFlight.has(ck)) { setAntennaLoading(true); const b = await rt.inFlight.get(ck); if (tok !== speechRequestCounter) return true; setAntennaLoading(false); if (b) { playAudioBufferWithLipSync(b, tok, onDone); return true; } }
+      const ac = new AbortController(); rt.setAbort(ac); setAntennaLoading(true);
+      let res;
+      try {
+        res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_TTS_MODEL}:streamGenerateContent?alt=sse&key=${encodeURIComponent(key)}`, {
+          method: "POST", headers: { "Content-Type": "application/json" }, signal: ac.signal,
+          body: JSON.stringify({ contents: [{ parts: [{ text: rt.ttsDir(st) + text }] }], generationConfig: { responseModalities: ["AUDIO"], speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: appState.selectedVoice || "Puck" } } } } })
+        });
+      } catch (e) { setAntennaLoading(false); return e?.name === "AbortError"; }
+      if (!res || !res.ok || !res.body) { setAntennaLoading(false); return false; }
+
+      const reader = res.body.getReader(), dec = new TextDecoder("utf-8"), chunks = [], rate = appState.speechSlow ? 0.88 : 0.98;
+      let bufStr = "", carry = null, sr = 24000, nextT = 0, started = false, ended = false, fired = false, total = 0;
+      const fin = () => { if (fired || tok !== speechRequestCounter) return; fired = true; currentVoiceSource = null; stopLipSyncLoop(); setSpeakingVisual(false, false); if (onDone) onDone(); };
+      const pushPcm = (b64, mime) => {
+        if (tok !== speechRequestCounter) return;
+        if (mime) { const m = mime.match(/rate=(\d+)/i); if (m) sr = parseInt(m[1], 10); }
+        let bytes = base64ToUint8Array(b64);
+        if (carry !== null) { const mg = new Uint8Array(bytes.length + 1); mg[0] = carry; mg.set(bytes, 1); bytes = mg; carry = null; }
+        if (bytes.length % 2 === 1) { carry = bytes[bytes.length - 1]; bytes = bytes.subarray(0, bytes.length - 1); }
+        const n = Math.floor(bytes.byteLength / 2); if (n <= 0) return;
+        const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength), f32 = new Float32Array(n);
+        for (let i = 0; i < n; i++) f32[i] = dv.getInt16(i * 2, true) / 32768.0;
+        chunks.push(f32); total += n;
+        if (ctx.state === "suspended") ctx.resume().catch(() => {});
+        const ab = ctx.createBuffer(1, n, sr); ab.getChannelData(0).set(f32);
+        const src = ctx.createBufferSource(); src.buffer = ab; src.playbackRate.value = rate; src.connect(voiceAnalyser);
+        const at = Math.max(ctx.currentTime + 0.045, nextT); nextT = at + (ab.duration / rate);
+        rt.sources.add(src); currentVoiceSource = src;
+        if (!started) { started = true; setAntennaLoading(false); setSpeakingVisual(true, false); startRealTimeLipSync(); }
+        src.onended = () => { rt.sources.delete(src); if (ended && rt.sources.size === 0) fin(); };
+        src.start(at);
+      };
+      try {
+        while (true) {
+          const { value, done } = await reader.read(); if (done) break;
+          if (tok !== speechRequestCounter) { try { reader.cancel(); } catch (e) {} return true; }
+          bufStr += dec.decode(value, { stream: true });
+          const lines = bufStr.split("\n"); bufStr = lines.pop() || "";
+          for (const l of lines) { const t = l.trim(); if (!t.startsWith("data:")) continue; const j = t.slice(5).trim(); if (!j || j === "[DONE]") continue; try { for (const p of (JSON.parse(j)?.candidates?.[0]?.content?.parts || [])) { if (p.inlineData?.data) pushPcm(p.inlineData.data, p.inlineData.mimeType); } } catch (e) {} }
+        }
+      } catch (e) { if (e?.name === "AbortError") return true; }
+      finally { ended = true; if (rt.getAbort() === ac) rt.setAbort(null); setAntennaLoading(false); }
+      if (total > 0) { try { const full = ctx.createBuffer(1, total, sr), out = full.getChannelData(0); let o = 0; for (const c of chunks) { out.set(c, o); o += c.length; } rt.putCache(ck, full); } catch (e) {} }
+      if (!started) return false; if (rt.sources.size === 0) fin(); return true;
+    }
+
+    function playClean(segs, tok, onAllDone) {
+      const list = (segs || []).filter(s => s?.text?.trim());
+      if (!list.length) { if (onAllDone) onAllDone(); return; }
+      const step = async (i) => {
+        if (tok !== speechRequestCounter) return;
+        if (i >= list.length) { if (onAllDone) onAllDone(); return; }
+        const seg = list[i], nxt = list[i + 1];
+        if (nxt && rt.getMode() === "neural" && rt.getKey()) rt.prefetchTts(nxt.text, nxt.style || "normal");
+        const next = () => { if (tok === speechRequestCounter) step(i + 1); };
+        if (rt.getMode() === "instant" || !rt.getKey()) { speakAdultMale(seg.text, seg.lang || "en-US", tok, next); return; }
+        const ok = await streamSlow(seg.text, seg.style || "normal", tok, next);
+        if (tok === speechRequestCounter && !ok) speakAdultMale(seg.text, seg.lang || "en-US", tok, next);
+      };
+      step(0);
+    }
+
+    window.speakRealVoice = async (text, { lang = "en-US", style = "normal", onDone = null } = {}) => {
+      const parts = rt.splitSents(text); if (!parts.length) { if (onDone) onDone(); return; }
+      stopAllSpeech(); playClean(parts.map(s => ({ text: s, lang, style })), speechRequestCounter, onDone);
+    };
+    window.speakBilingual = async (en, jp = "", incJp = false, style = "normal", onDone = null) => {
+      const enParts = rt.splitSents(en), cJp = cleanSpeech(jp); stopAllSpeech();
+      const segs = enParts.map(p => ({ text: p, lang: "en-US", style }));
+      if ((incJp || !enParts.length) && cJp && appState.showJapanese) segs.push({ text: cJp, lang: "ja-JP", style: "normal" });
+      playClean(segs, speechRequestCounter, onDone);
+    };
+  }
+  window.speakBrowserFallback = (text, lang, onDone) => speakAdultMale(text, lang, speechRequestCounter, onDone);
+})();
+</script>
 </body>
 </html>
