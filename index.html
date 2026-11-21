@@ -5209,5 +5209,74 @@ RULES FOR EVERY RESPONSE:
   document.addEventListener("pointerdown", () => prewarm(false), { once: true, passive: true });
 })();
 </script>
+      <script>
+(() => {
+  let maleTimer = null;
+  const EN_BEST = /\b(Aaron|Daniel|Alex|Arthur|Oliver|Gordon|Rishi|David|Mark|Guy|Ryan|Christopher|George)\b|UK English Male/i;
+  const EN_ALT  = /\b(Reed|Rocko|Eddy|Fred)\b|\bMale\b/i;
+  const JP_BEST = /\b(Otoya|Hattori|Ichiro|Keita|Eddy)\b|\bMale\b/i;
+  const FEMALE  = /\b(Samantha|Karen|Moira|Tessa|Victoria|Nicky|Kyoko|O-Ren|Zira|Aria|Jenny|Shelley|Sandy|Flo|Kathy|Haruka|Nanami)\b|Female/i;
+
+  function pickMaleVoice(lang) {
+    const vs = window.speechSynthesis.getVoices() || [];
+    const pfx = (lang || "en").slice(0, 2).toLowerCase();
+    const list = vs.filter(v => v.lang.toLowerCase().startsWith(pfx));
+    const best = pfx === "ja"
+      ? list.find(v => JP_BEST.test(v.name) && !FEMALE.test(v.name))
+      : (list.find(v => EN_BEST.test(v.name) && !FEMALE.test(v.name)) || list.find(v => EN_ALT.test(v.name) && !FEMALE.test(v.name)));
+    if (best) return { voice: best, isMale: true };
+    const nonFem = list.find(v => !FEMALE.test(v.name));
+    return { voice: nonFem || list[0] || null, isMale: false };
+  }
+
+  const _origStop = window.stopAllSpeech;
+  window.stopAllSpeech = function () {
+    clearTimeout(maleTimer);
+    if (_origStop) _origStop();
+  };
+
+  function speakAdultMale(text, lang, tok, onDone) {
+    if (!("speechSynthesis" in window) || !text) {
+      if (tok === speechRequestCounter && onDone) onDone();
+      return;
+    }
+    try {
+      if (window.speechSynthesis.speaking || window.speechSynthesis.pending) window.speechSynthesis.cancel();
+      clearTimeout(maleTimer);
+      let done = false;
+      const fin = () => {
+        if (done) return;
+        done = true;
+        clearTimeout(maleTimer);
+        setSpeakingVisual(false, false);
+        if (!activeRecognition) document.getElementById("robotStatusText").textContent = "Ready! 🤖";
+        if (tok === speechRequestCounter && onDone) onDone();
+      };
+
+      const u = new SpeechSynthesisUtterance(text);
+      u.lang = lang || "en-US";
+      u.rate = appState.speechSlow ? 0.86 : 1.0;
+
+      const picked = pickMaleVoice(u.lang);
+      if (picked.voice) u.voice = picked.voice;
+      // Adult male pitch; drops deeper if device only has a female voice installed
+      u.pitch = picked.isMale ? 0.92 : 0.72;
+
+      u.onstart = () => setSpeakingVisual(true, true);
+      u.onend = fin;
+      u.onerror = fin;
+      setSpeakingVisual(true, true);
+      window.speechSynthesis.speak(u);
+      maleTimer = setTimeout(fin, Math.max(2400, text.length * 115));
+    } catch (e) {
+      setSpeakingVisual(false, false);
+      if (tok === speechRequestCounter && onDone) onDone();
+    }
+  }
+
+  if (window._rt) window._rt.speakLocal = speakAdultMale;
+  window.speakBrowserFallback = (text, lang, onDone) => speakAdultMale(text, lang, speechRequestCounter, onDone);
+})();
+</script>
 </body>
 </html>
