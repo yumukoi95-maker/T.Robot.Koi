@@ -5449,5 +5449,181 @@ RULES FOR EVERY RESPONSE:
   window.speakBrowserFallback = (text, lang, onDone) => speakAdultMale(text, lang, speechRequestCounter, onDone);
 })();
 </script>
+  <script>
+(() => {
+  const rt = window._rt;
+  const TEXT_MODELS = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-3-flash-preview", "gemini-2.0-flash"];
+  let workingModel = null, chatAbort = null, lastOfflineIdx = -1;
+  const usedOffline = new Set();
+
+  const SCHEMA = {
+    type: "OBJECT",
+    properties: {
+      catchphrase: { type: "STRING", enum: ["none", "carbonara", "pizza", "babubabu"] },
+      mood: { type: "STRING", enum: ["happy", "hype", "silly", "thinking"] },
+      starAwarded: { type: "BOOLEAN" },
+      english: { type: "STRING" },
+      japanese: { type: "STRING" }
+    },
+    required: ["catchphrase", "mood", "starAwarded", "english", "japanese"]
+  };
+
+  const getKey = () => rt ? rt.getKey() : ((typeof apiKey === "string" && apiKey.trim()) || (localStorage.getItem("robot_tkoi_gemini_apikey_v1") || "").trim());
+
+  // Keep history strictly alternating user -> model -> user
+  function cleanHistory(raw) {
+    const out = [];
+    for (const m of (raw || []).slice(-10)) {
+      if (!m || !m.role || !m.parts?.[0]?.text) continue;
+      if (!out.length && m.role !== "user") continue;
+      if (out.length && out[out.length - 1].role === m.role) {
+        out[out.length - 1] = m;
+      } else {
+        out.push(m);
+      }
+    }
+    return out;
+  }
+
+  function buildAntiRepeatPrompt(scenario) {
+    const recentKoi = appState.chatMessages.filter(m => m.sender === "koi").slice(-5).map(m => m.english).join(" | ");
+    return buildKoiSystemPrompt(scenario) + `\n\nANTI-REPETITION RULES (CRITICAL):
+- You MUST react directly to what the student JUST said.
+- NEVER repeat or re-ask anything similar to your recent lines: [${recentKoi}]
+- Always move the conversation forward with ONE new, playful Grade 1 question or reaction (max 2 short sentences).`;
+  }
+
+  async function callFastModel(contents, sysPrompt, schema) {
+    const key = getKey();
+    if (!key) return { data: null, err: "No API key (add in ⚙️ Teacher)" };
+    if (chatAbort) { try { chatAbort.abort(); } catch (e) {} }
+    const ac = new AbortController(); chatAbort = ac;
+
+    const candidates = workingModel ? [workingModel, ...TEXT_MODELS.filter(m => m !== workingModel)] : TEXT_MODELS;
+    let lastErr = "Network error";
+
+    for (const model of candidates) {
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(key)}`;
+      const thinkCfg = model.startsWith("gemini-2.5") ? { thinkingConfig: { thinkingBudget: 0 } }
+        : model.startsWith("gemini-3") ? { thinkingConfig: { thinkingLevel: "minimal" } } : {};
+
+      const makeBody = (withThink) => JSON.stringify({
+        contents,
+        systemInstruction: { parts: [{ text: sysPrompt }] },
+        generationConfig: {
+          responseMimeType: "application/json",
+          responseSchema: schema,
+          temperature: 0.9,
+          maxOutputTokens: 220,
+          ...(withThink ? thinkCfg : {})
+        }
+      });
+
+      try {
+        let res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: makeBody(true), signal: ac.signal });
+        if (res.status === 400) {
+          res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: makeBody(false), signal: ac.signal });
+        }
+        if (res.ok) {
+          const json = await res.json();
+          const txt = json?.candidates?.[0]?.content?.parts?.[0]?.text;
+          if (txt) {
+            workingModel = model;
+            if (chatAbort === ac) chatAbort = null;
+            return { data: JSON.parse(txt), err: null };
+          }
+        } else {
+          lastErr = `API ${res.status}`;
+          if (res.status === 401 || res.status === 403) break;
+        }
+      } catch (e) {
+        if (e?.name === "AbortError") return { data: null, err: "aborted" };
+        lastErr = "Network error";
+      }
+    }
+    if (chatAbort === ac) chatAbort = null;
+    return { data: null, err: lastErr };
+  }
+
+  // Upgrade AI Quiz calls to use the same auto-working model list
+  window.callGeminiStructured = async (prompt, sys, schema, hist = null) => {
+    const contents = hist ? cleanHistory(hist) : [{ role: "user", parts: [{ text: prompt }] }];
+    const { data } = await callFastModel(contents, sys, schema);
+    return data;
+  };
+
+  // Upgraded non-repeating offline bank (only used if no API key or offline)
+  const OFFLINE_BANK = [
+    { en: "Cool! Do you like shopping at a market or a big store?", jp: "いいね！マーケットと おおきな おみせ、どっちが すきかな？", m: "happy", cp: "none" },
+    { en: "Awesome! What yummy food do you want to buy today?", jp: "すごいね！きょうは なにの おいしい たべものを かいたいかな？", m: "hype", cp: "carbonara" },
+    { en: "Beep beep! A big truck brings boxes to your front door! What is inside?", jp: "プップー！おおきなトラックが はこを とどけたよ！なかに なにが はいってるかな？", m: "hype", cp: "none" },
+    { en: "Nice job! Tell me one thing you NEED every day!", jp: "じょうずだね！まいにち ひつようなもの（NEED）を ひとつ おしえて！", m: "happy", cp: "carbonara" },
+    { en: "Fun! If you have five dollars, will you spend it or save it?", jp: "たのしいね！5ドル もっていたら、つかう？それとも ちょきんする？", m: "happy", cp: "none" },
+    { en: "Whoa! Farmers grow fresh apples and pink flowers! Which one do you like?", jp: "わぁ！のうかの人は りんごや ピンクの はなを そだてるよ！どっちが すき？", m: "hype", cp: "none" },
+    { en: "Haha, super! Can a big ship carry goods across the ocean?", jp: "あはは、スーパー！おおきな ふねは うみをこえて しなものを はこべるかな？", m: "happy", cp: "none" },
+    { en: "Yay! Is a toy robot a NEED or a WANT?", jp: "やった！ロボットのおもちゃは ひつよう（NEED）かな？ほしい（WANT）かな？", m: "hype", cp: "pizza" }
+  ];
+
+  window.generateOfflineKoiReply = (userText) => {
+    const t = (userText || "").toLowerCase();
+    if (/ヒント|日本語|わからない|help|hint/.test(t)) {
+      return { english: "Try saying: I buy apples at the market!", japanese: "『I buy apples at the market!』って言ってみよう！", mood: "silly", catchphrase: "babubabu", starAwarded: false };
+    }
+    if (usedOffline.size >= OFFLINE_BANK.length) usedOffline.clear();
+    const choices = OFFLINE_BANK.map((v, i) => i).filter(i => !usedOffline.has(i) && i !== lastOfflineIdx);
+    const pick = choices[Math.floor(Math.random() * choices.length)] ?? 0;
+    usedOffline.add(pick); lastOfflineIdx = pick;
+    const item = OFFLINE_BANK[pick];
+    return { english: item.en, japanese: item.jp, mood: item.m, catchphrase: item.cp, starAwarded: true };
+  };
+
+  window.sendChatMessage = async (override = null) => {
+    const inp = document.getElementById("chatTextInput");
+    const text = (override !== null ? override : inp.value).trim();
+    if (!text) return;
+
+    // Stop mic echo loop if Auto-Talk picked up Robot T.Koi's own voice
+    if (appState.lastKoiEn && text.length > 10 && appState.lastKoiEn.toLowerCase().includes(text.toLowerCase())) return;
+
+    inp.value = ""; SFX.pop();
+    appState.chatMessages.push({ sender: "user", text });
+    renderChatLog();
+    appState.geminiHistory.push({ role: "user", parts: [{ text }] });
+    appState.geminiHistory = cleanHistory(appState.geminiHistory);
+
+    const badge = document.getElementById("liveTranscriptBadge");
+    setRobotMood("thinking");
+    if (getKey()) setAntennaLoading(true);
+    badge.textContent = getKey() ? "Robot T.Koi is thinking... ⚡" : "Offline mode (add key in ⚙️ Teacher)";
+
+    const { data: aiReply, err } = await callFastModel(
+      appState.geminiHistory,
+      buildAntiRepeatPrompt(appState.talkScenario),
+      SCHEMA
+    );
+    setAntennaLoading(false);
+    if (err === "aborted") return;
+
+    const reply = aiReply || window.generateOfflineKoiReply(text);
+    appState.geminiHistory.push({ role: "model", parts: [{ text: reply.english }] });
+
+    appState.chatMessages.push({ sender: "koi", english: reply.english, japanese: reply.japanese });
+    renderChatLog();
+    badge.textContent = aiReply ? `⚡ Live AI (${workingModel})` : `⚠️ ${err || "Offline"} — using backup`;
+    updateKoiBubble(reply.english, reply.japanese, false);
+
+    if (reply.starAwarded) awardStars(1, reply.catchphrase !== "none");
+    const wantsJp = reply.catchphrase === "babubabu" || /日本語|ヒント|わからない|むずかしい/.test(text);
+    const doneCb = () => { if (rt?.autoReopenMic) rt.autoReopenMic(); };
+
+    if (reply.catchphrase && reply.catchphrase !== "none") {
+      await speakCatchphraseThenLine(reply.catchphrase, reply.english, reply.japanese, wantsJp, doneCb);
+    } else {
+      setRobotMood(reply.mood || "happy", 3000);
+      await speakBilingual(reply.english, reply.japanese, wantsJp, "normal", doneCb);
+    }
+  };
+})();
+</script>
 </body>
 </html>
