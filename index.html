@@ -5625,5 +5625,235 @@ RULES FOR EVERY RESPONSE:
   };
 })();
 </script>
+  <script>
+(() => {
+  const rt = window._rt;
+  let usTimer = null, usDelay = null;
+  window._activeUtter = null;
+
+  const US_MALE = /\b(Alex|Aaron|Evan|Nathan|Tom|Matthew|Andrew|Christopher|Guy|Eric|Davis|David|Mark|Steffan|Brandon|Jacob|Tony|Jason)\b/i;
+  const JP_MALE = /\b(Otoya|Hattori|Ichiro|Keita)\b/i;
+  const BLOCKED = /\b(Samantha|Karen|Moira|Tessa|Victoria|Nicky|Ava|Allison|Susan|Zoe|Kyoko|O-Ren|Tingting|Sinji|Meijia|Zira|Aria|Jenny|Shelley|Sandy|Flo|Kathy|Haruka|Nanami|Fred|Eddy|Reed|Rocko|Albert|Bells|Bubbles|Cellos|Grandma|Grandpa|Jester|Junior|Organ|Ralph|Superstar|Trinoids|Whisper|Wobble|Zarvox|Rishi|Daniel|Arthur|Oliver|Gordon)\b|Female|Chinese|Cantonese|Mandarin|Taiwan|Hong Kong/i;
+
+  const isJpText = (t) => /[\u3040-\u30ff\u4e00-\u9faf]/.test(t || "");
+  const cleanUS = (t) => (t || "").replace(/T\.?\s*Koi/gi, "Teacher Coy").replace(/\.{2,}/g, ", ").replace(/!{2,}/g, "!").replace(/\s+/g, " ").trim();
+
+  function pickUSMale(lang) {
+    const vs = window.speechSynthesis.getVoices() || [];
+    if ((lang || "").toLowerCase().startsWith("ja")) {
+      const jp = vs.filter(v => /^ja/i.test(v.lang) && !BLOCKED.test(v.name));
+      const m = jp.find(v => JP_MALE.test(v.name)) || jp[0] || vs.find(v => /^ja/i.test(v.lang));
+      return { voice: m || null, isMale: !!(m && JP_MALE.test(m.name)) };
+    }
+    const us = vs.filter(v => /^en[-_]us$/i.test(v.lang) && !BLOCKED.test(v.name));
+    const best = us.find(v => US_MALE.test(v.name));
+    if (best) return { voice: best, isMale: true };
+    const g = us.find(v => /Google US English/i.test(v.name)) || us[0];
+    if (g) return { voice: g, isMale: false };
+    const en = vs.filter(v => /^en/i.test(v.lang) && !BLOCKED.test(v.name));
+    const em = en.find(v => US_MALE.test(v.name));
+    return { voice: em || en[0] || null, isMale: !!em };
+  }
+
+  const _prevStop = window.stopAllSpeech;
+  window.stopAllSpeech = () => { clearTimeout(usTimer); clearTimeout(usDelay); window._activeUtter = null; if (_prevStop) _prevStop(); };
+
+  function speakUSMale(text, lang, tok, onDone) {
+    const jp = (lang || "").toLowerCase().startsWith("ja") || isJpText(text);
+    const clean = jp ? (text || "").trim() : cleanUS(text);
+    if (!("speechSynthesis" in window) || !clean) { if (tok === speechRequestCounter && onDone) onDone(); return; }
+    try {
+      clearTimeout(usTimer); clearTimeout(usDelay);
+      if (window.speechSynthesis.speaking || window.speechSynthesis.pending) window.speechSynthesis.cancel();
+      usDelay = setTimeout(() => {
+        if (tok !== speechRequestCounter) return;
+        let done = false;
+        const fin = () => { if (done) return; done = true; clearTimeout(usTimer); window._activeUtter = null; setSpeakingVisual(false, false); if (!activeRecognition) document.getElementById("robotStatusText").textContent = "Ready! 🇺🇸🤖"; if (tok === speechRequestCounter && onDone) onDone(); };
+        const u = new SpeechSynthesisUtterance(clean); window._activeUtter = u;
+        u.lang = jp ? "ja-JP" : "en-US";
+        u.rate = appState.speechSlow ? 0.76 : 0.92;
+        const p = pickUSMale(u.lang); if (p.voice) u.voice = p.voice;
+        u.pitch = p.isMale ? 0.94 : 0.76;
+        const maxMs = Math.max(7000, clean.length * (appState.speechSlow ? 290 : 210));
+        u.onstart = () => { setSpeakingVisual(true, true); clearTimeout(usTimer); usTimer = setTimeout(fin, maxMs); };
+        u.onend = fin; u.onerror = fin;
+        setSpeakingVisual(true, true); usTimer = setTimeout(fin, maxMs + 2000);
+        window.speechSynthesis.speak(u);
+      }, 75);
+    } catch (e) { setSpeakingVisual(false, false); if (tok === speechRequestCounter && onDone) onDone(); }
+  }
+
+  // Upgrade default Gemini voice from Puck -> Orus (handsome native American male)
+  if (appState.selectedVoice === "Puck" && !localStorage.getItem("robot_tkoi_us_voice_init")) {
+    appState.selectedVoice = "Orus";
+    try { localStorage.setItem("robot_tkoi_us_voice_init", "1"); saveCustomData(); } catch (e) {}
+    if (typeof renderHud === "function") renderHud();
+  }
+
+  if (rt) {
+    rt.speakLocal = speakUSMale;
+    rt.ttsDir = (st) => st === "jp"
+      ? "Speak in warm, friendly, natural native Japanese for a 6-year-old: "
+      : st === "hype" ? "Speak in a charismatic, handsome, warm native American English (US) adult male voice with a pure General American accent (no foreign or Asian accent), joyful and clear: "
+      : st === "silly" ? "Speak in a playful, warm native American English (US) adult male voice with a pure General American accent, funny and slow for a 6-year-old: "
+      : appState.speechSlow ? "Speak in a smooth, warm, handsome native American English (US) adult male voice with a pure General American accent (never any Chinese or foreign accent), slowly and clearly for a 6-year-old: "
+      : "Speak in a smooth, warm, handsome native American English (US) adult male voice with a pure General American accent (never any Chinese or foreign accent), friendly and relaxed: ";
+
+    const _origSplit = rt.splitSents;
+    rt.splitSents = (t) => { const c = isJpText(t) ? (t || "").trim() : cleanUS(t); return !c ? [] : (_origSplit ? _origSplit(c) : [c]); };
+
+    const _origReal = window.speakRealVoice;
+    window.speakRealVoice = (text, opts = {}) => {
+      const jp = (opts.lang || "").toLowerCase().startsWith("ja") || isJpText(text);
+      return _origReal(jp ? text : cleanUS(text), { ...opts, lang: jp ? "ja-JP" : (opts.lang || "en-US"), style: jp ? "jp" : (opts.style || "normal") });
+    };
+  }
+
+  window.speakBilingual = async (en, jp = "", incJp = false, style = "normal", onDone = null) => {
+    const cEn = (en || "").trim(), cJp = (jp || "").trim();
+    const sayJp = (incJp || !cEn) && cJp && appState.showJapanese;
+    if (cEn && sayJp) {
+      if (rt && rt.getMode() === "neural" && rt.getKey()) rt.prefetchTts(cJp, "jp");
+      await window.speakRealVoice(cEn, { lang: "en-US", style, onDone: () => window.speakRealVoice(cJp, { lang: "ja-JP", style: "jp", onDone }) });
+    } else if (cEn) await window.speakRealVoice(cEn, { lang: "en-US", style, onDone });
+    else if (sayJp) await window.speakRealVoice(cJp, { lang: "ja-JP", style: "jp", onDone });
+    else if (onDone) onDone();
+  };
+  window.speakBrowserFallback = (text, lang, onDone) => speakUSMale(text, lang, speechRequestCounter, onDone);
+})();
+</script>
+<script>
+(() => {
+  const PHRASES = {
+    bigquestion: [
+      { label: "💧 Needs & Wants (p.140)", items: [
+        ["💧 Water and food are needs!", "SB p.142"], ["🏠 Everyone needs a warm home.", "SB p.142"],
+        ["🤖 A toy robot is a fun want!", "SB p.143"], ["🧥 A coat is a need in winter.", "SB p.142"],
+        ["🍕 Pizza is a yummy want!", "SB p.143"], ["💰 We use money to get what we need.", "SB p.140"]
+      ]},
+      { label: "🏪 Markets & Flowers (p.148)", items: [
+        ["🍎 I buy fresh apples at the market!", "SB p.148"], ["💐 Farmers grow and sell pink flowers!", "SB p.167"],
+        ["🥖 The baker bakes warm bread.", "SB p.145"], ["🏢 A flower shop is a good business.", "SB p.167"],
+        ["🛒 My family shops on Sunday.", "SB p.148"], ["✂️ A haircut is a helpful service.", "SB p.144"]
+      ]},
+      { label: "🚚 Delivery & Money (p.178)", items: [
+        ["🏭 Workers make goods in a factory.", "SB p.178"], ["📦 Workers pack boxes together.", "SB p.178"],
+        ["🚚 Big trucks deliver goods to stores!", "SB p.178"], ["🚢 Ships carry fruit across the sea.", "SB p.178"],
+        ["🚪 A box comes to my front door!", "SB p.178"], ["🐷 I earn money and save coins!", "SB p.203"]
+      ]}
+    ],
+    roleplay: [
+      { label: "🛒 Market Shop (p.148)", items: [
+        ["👋 Hello! I want to buy apples!", "SB p.148"], ["💐 Can I buy a pink flower, please?", "SB p.167"],
+        ["🥖 I need bread and milk, please!", "SB p.148"], ["💵 How much is this pizza?", "SB p.203"],
+        ["💰 Here is my money. Thank you!", "SB p.203"], ["🛍️ Do you sell sweet fruit?", "SB p.148"]
+      ]},
+      { label: "🚚 Delivery Driver (p.178)", items: [
+        ["📦 Knock knock! Delivery for you!", "SB p.178"], ["🚚 My truck came from the factory!", "SB p.178"],
+        ["🚪 Open your front door! Here is your box!", "SB p.178"], ["🚢 This package came on a big ship!", "SB p.178"],
+        ["🍕 Did you order Margherita pizza?", "SB p.178"], ["🙌 Thank you for delivering my goods!", "SB p.178"]
+      ]}
+    ]
+  };
+  let groupIdx = 0;
+
+  window.renderPromptChips = () => {
+    const box = document.getElementById("promptChips"); if (!box) return;
+    const groups = PHRASES[appState.talkScenario] || PHRASES.bigquestion;
+    if (groupIdx >= groups.length) groupIdx = 0;
+    box.innerHTML = ""; box.className = "flex flex-col gap-2";
+
+    const bar = document.createElement("div"); bar.className = "flex flex-wrap items-center gap-1.5";
+    groups.forEach((g, i) => {
+      const b = document.createElement("button");
+      b.className = i === groupIdx ? "btn-pop px-2.5 py-1 rounded-xl text-[11px] font-extrabold bg-blue-600 text-white shadow-sm" : "btn-pop px-2.5 py-1 rounded-xl text-[11px] font-bold bg-slate-100 hover:bg-slate-200 text-slate-700";
+      b.textContent = g.label; b.onclick = () => { SFX.pop(); groupIdx = i; window.renderPromptChips(); };
+      bar.appendChild(b);
+    });
+    const tip = document.createElement("span"); tip.className = "text-[10px] font-bold text-slate-400 ml-auto"; tip.textContent = "🔊 listen first • tap phrase to say!";
+    bar.appendChild(tip); box.appendChild(bar);
+
+    const grid = document.createElement("div"); grid.className = "flex flex-wrap gap-1.5";
+    groups[groupIdx].items.forEach(([txt, pg]) => {
+      const sendTxt = txt.replace(/^[^\w]+/, "").trim();
+      const wrap = document.createElement("div"); wrap.className = "inline-flex items-center bg-amber-100 border border-amber-300 rounded-full shadow-sm overflow-hidden";
+      const h = document.createElement("button"); h.className = "px-2 py-1.5 text-xs hover:bg-amber-200 border-r border-amber-300/70"; h.textContent = "🔊";
+      h.onclick = (e) => { e.stopPropagation(); speakRealVoice(sendTxt, { lang: "en-US", style: "normal" }); };
+      const s = document.createElement("button"); s.className = "btn-pop px-2.5 py-1.5 hover:bg-amber-200 text-amber-950 font-bold text-xs sm:text-sm flex items-center gap-1.5";
+      s.innerHTML = `<span>${escapeHtml(txt)}</span><span class="text-[10px] font-extrabold bg-white/80 text-blue-800 px-1.5 py-0.5 rounded-full">${pg}</span>`;
+      s.onclick = () => sendChatMessage(sendTxt);
+      wrap.append(h, s); grid.appendChild(wrap);
+    });
+    box.appendChild(grid);
+  };
+
+  function pageFor(text) {
+    const t = (text || "").toLowerCase();
+    if (/flower|petal|flower power/.test(t)) return "📖 SB p.167 • Flower Power";
+    if (/money|coin|penny|nickel|dime|quarter|dollar|earn|spend|save|piggy/.test(t)) return "📖 SB p.203 • Money!";
+    if (/deliver|truck|factory|pack|ship|plane|front door|package|box/.test(t)) return "📖 SB pp.178–201 • Delivery";
+    if (/need|want|water|coat|home|toy/.test(t)) return "📖 SB pp.140–143 • Needs & Wants";
+    if (/baker|bakes|grows|sells|packs|verb/.test(t)) return "📖 SB pp.145 & 175 • Action Verbs";
+    if (/short u|bug|cup|bus|sun|run|pup/.test(t)) return "📖 SB p.146 • Phonics (Short u)";
+    if (/hand|pink|tent|plant|pick|peck/.test(t)) return "📖 SB p.176 • Phonics (Blends/-ck)";
+    if (/market|buy|sell|goods|shop|farmer|apple|fruit|store|service/.test(t)) return "📖 SB pp.148–165 • Markets";
+    return "📖 SB pp.140–141 • Unit 3 Big Question";
+  }
+
+  function addTextbookBars() {
+    const tp = document.getElementById("panel-talk");
+    if (tp && !document.getElementById("talkBookBar")) {
+      const d = document.createElement("div"); d.id = "talkBookBar";
+      d.className = "flex flex-wrap items-center gap-1.5 bg-indigo-50 border border-indigo-200 rounded-2xl px-3 py-1.5 text-[11px] font-bold text-indigo-900";
+      d.innerHTML = `<span class="font-extrabold text-indigo-700">📘 Reach Higher 1A:</span><span class="bg-white px-2 py-0.5 rounded-full border border-indigo-200">Big Q p.140</span><span class="bg-white px-2 py-0.5 rounded-full border border-indigo-200">Markets p.148</span><span class="bg-white px-2 py-0.5 rounded-full border border-indigo-200">Flower Power p.167</span><span class="bg-white px-2 py-0.5 rounded-full border border-indigo-200">Delivery p.178</span><span class="bg-white px-2 py-0.5 rounded-full border border-indigo-200">Money! p.203</span>`;
+      tp.insertBefore(d, tp.children[1] || null);
+    }
+    const qh = document.querySelector("#panel-quest h2");
+    if (qh && !qh.dataset.pg) { qh.dataset.pg = "1"; qh.innerHTML += ` <span class="text-xs font-extrabold bg-white text-blue-800 border border-blue-200 px-2 py-0.5 rounded-full ml-1">📖 SB pp.178–201</span>`; }
+    const gh = document.querySelector("#arenaGrammarPanel .text-indigo-500 span");
+    if (gh && !gh.dataset.pg) { gh.dataset.pg = "1"; gh.innerHTML = `<span class="bg-white text-indigo-800 border border-indigo-200 px-2 py-0.5 rounded-full mr-1">📖 SB pp.145 &amp; 175</span> ` + gh.innerHTML; }
+    const nh = document.querySelector("#arenaNeedWantPanel .text-emerald-700 span");
+    if (nh && !nh.dataset.pg) { nh.dataset.pg = "1"; nh.innerHTML = `<span class="bg-white text-emerald-800 border border-emerald-300 px-2 py-0.5 rounded-full mr-1">📖 SB pp.140–143</span> ` + nh.innerHTML; }
+  }
+
+  const _rc = window.renderChatLog;
+  window.renderChatLog = () => {
+    if (_rc) _rc();
+    const koi = appState.chatMessages.filter(m => m.sender === "koi");
+    document.querySelectorAll("#chatLog .bg-white.border-blue-200").forEach((el, i) => {
+      if (!koi[i] || el.querySelector(".tb-ref")) return;
+      const p = document.createElement("div"); p.className = "tb-ref mt-1.5 inline-block bg-indigo-50 text-indigo-800 border border-indigo-200 text-[10px] font-extrabold px-2 py-0.5 rounded-full";
+      p.textContent = pageFor(koi[i].english); el.appendChild(p);
+    });
+  };
+
+  const _rw = window.renderWordsMode;
+  window.renderWordsMode = () => {
+    if (_rw) _rw();
+    const b = document.getElementById("cardCategoryBadge"), card = getCurrentWordCard();
+    if (!b || b.textContent.includes("📖")) return;
+    const pg = appState.wordCategory === "delivery" ? "📖 SB pp.172–203" : appState.wordCategory === "hfw" ? "📖 SB pp.144 & 174" : appState.wordCategory === "phonics" ? ((card?.phonicsTag || "").includes("Short u") ? "📖 SB p.146" : "📖 SB p.176") : appState.wordCategory === "custom" ? "📖 Practice Book pp.80+" : "📖 SB pp.142–165";
+    b.textContent = `${b.textContent} • ${pg}`;
+  };
+
+  const _sq = window.renderBuiltInStoryQuiz;
+  window.renderBuiltInStoryQuiz = () => {
+    if (_sq) _sq();
+    const t = document.getElementById("quizTag"), q = document.getElementById("quizQuestionEn")?.textContent || "";
+    if (t && !t.textContent.includes("📖")) t.textContent = `${t.textContent} • ${pageFor(t.textContent + " " + q)}`;
+  };
+
+  const _aq = window.askAiForQuizQuestion;
+  window.askAiForQuizQuestion = async () => {
+    if (_aq) await _aq();
+    const t = document.getElementById("quizTag"), q = document.getElementById("quizQuestionEn")?.textContent || "";
+    if (t && !t.textContent.includes("📖")) t.textContent = `${t.textContent} • ${pageFor(q)}`;
+  };
+
+  addTextbookBars();
+  window.renderPromptChips();
+  window.renderChatLog();
+})();
+</script>
 </body>
 </html>
