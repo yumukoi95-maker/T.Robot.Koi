@@ -5855,5 +5855,164 @@ RULES FOR EVERY RESPONSE:
   window.renderChatLog();
 })();
 </script>
+  <script>
+(() => {
+  const rt = window._rt;
+  if (typeof ttsAudioCache !== "undefined") ttsAudioCache.clear();
+  let locTimer = null, locDelay = null, workingTts = null;
+  window._activeUtter = null;
+
+  const isJp = (t) => /[\u3040-\u30ff\u4e00-\u9faf]/.test(t || "");
+  const cleanEn = (t) => (t || "").replace(/T\.?\s*Koi/gi, "Teacher Coy").replace(/\.{2,}/g, ", ").replace(/!{2,}/g, "!").replace(/\s+/g, " ").trim();
+
+  const US_MALE = ["Aaron","Alex","Evan","Nathan","Tom","Matthew","Andrew","Christopher","Guy","Eric","Davis","David","Mark","Steffan","Brandon","Jacob","Tony","Jason"];
+  const NATIVE_MALE = ["Daniel","Arthur","Oliver","Gordon","Lee"];
+  const JP_MALE = ["Otoya","Hattori","Ichiro","Keita"];
+  const NEVER = /Bad News|Bahh|Bells|Boing|Bubbles|Cellos|Good News|Jester|Organ|Superstar|Trinoids|Whisper|Wobble|Zarvox|Albert|Fred|Kathy|Ralph|Grandma|Grandpa|Eddy|Reed|Rocko|Sandy|Shelley|Flo|Chinese|Mandarin|Cantonese|Tingting|Sinji|Meijia|Tian-Tian|O-Ren|Rishi|Veena|Isha|Lekha/i;
+
+  function findBestLocal(lang) {
+    const vs = window.speechSynthesis.getVoices() || [];
+    if ((lang || "").toLowerCase().startsWith("ja")) {
+      const jp = vs.filter(v => /^ja/i.test(v.lang) && !NEVER.test(v.name));
+      const m = jp.find(v => JP_MALE.some(n => v.name.includes(n)));
+      return { voice: m || jp[0] || null, label: (m || jp[0])?.name || "JP", male: !!m };
+    }
+    const us = vs.filter(v => /^en[-_]us$/i.test(v.lang) && !NEVER.test(v.name));
+    for (const n of US_MALE) { const v = us.find(x => new RegExp(`\\b${n}\\b`, "i").test(x.name)); if (v) return { voice: v, label: `${v.name} (US)`, male: true }; }
+    const clean = vs.filter(v => /^en[-_](us|gb|au|ca|nz|ie)$/i.test(v.lang) && !NEVER.test(v.name));
+    for (const n of NATIVE_MALE) { const v = clean.find(x => new RegExp(`\\b${n}\\b`, "i").test(x.name)); if (v) return { voice: v, label: `${v.name} (${v.lang})`, male: true }; }
+    const g = us.find(v => /Google US English/i.test(v.name));
+    if (g) return { voice: g, label: "Google US", male: false };
+    const sam = us.find(v => /\bSamantha\b/i.test(v.name)) || us[0] || clean[0];
+    return { voice: sam || null, label: sam ? `${sam.name} (${sam.lang})` : "Default", male: false };
+  }
+
+  const _stop = window.stopAllSpeech;
+  window.stopAllSpeech = () => { clearTimeout(locTimer); clearTimeout(locDelay); window._activeUtter = null; if (_stop) _stop(); };
+
+  function speakCleanLocal(text, lang, tok, onDone) {
+    const jp = (lang || "").toLowerCase().startsWith("ja") || isJp(text);
+    const clean = jp ? (text || "").trim() : cleanEn(text);
+    if (!("speechSynthesis" in window) || !clean) { if (tok === speechRequestCounter && onDone) onDone(); return; }
+    try {
+      clearTimeout(locTimer); clearTimeout(locDelay);
+      if (window.speechSynthesis.speaking || window.speechSynthesis.pending) window.speechSynthesis.cancel();
+      locDelay = setTimeout(() => {
+        if (tok !== speechRequestCounter) return;
+        let done = false;
+        const fin = () => { if (done) return; done = true; clearTimeout(locTimer); window._activeUtter = null; setSpeakingVisual(false, false); if (tok === speechRequestCounter && onDone) onDone(); };
+        const u = new SpeechSynthesisUtterance(clean); window._activeUtter = u;
+        const p = findBestLocal(jp ? "ja-JP" : "en-US");
+        if (p.voice) { u.voice = p.voice; u.lang = p.voice.lang; } else u.lang = jp ? "ja-JP" : "en-US";
+        u.rate = appState.speechSlow ? 0.78 : 0.94;
+        u.pitch = p.male ? 0.96 : 0.90;
+        const maxMs = Math.max(7000, clean.length * (appState.speechSlow ? 290 : 210));
+        u.onstart = () => { setSpeakingVisual(true, true); const s = document.getElementById("robotStatusText"); if (s) s.textContent = `🔊 Device: ${p.label}`; clearTimeout(locTimer); locTimer = setTimeout(fin, maxMs); };
+        u.onend = fin; u.onerror = fin;
+        setSpeakingVisual(true, true); locTimer = setTimeout(fin, maxMs + 2000);
+        window.speechSynthesis.speak(u);
+      }, 75);
+    } catch (e) { setSpeakingVisual(false, false); if (tok === speechRequestCounter && onDone) onDone(); }
+  }
+
+  window.playAudioBufferWithLipSync = (buf, tok, onDone = null) => {
+    const ctx = getAudioCtx();
+    if (!ctx || !buf || tok !== speechRequestCounter) { if (onDone) onDone(); return; }
+    try {
+      if (ctx.state === "suspended") ctx.resume().catch(() => {});
+      const src = ctx.createBufferSource(); src.buffer = buf; src.playbackRate.value = 1.0;
+      src.connect(voiceAnalyser); currentVoiceSource = src;
+      setSpeakingVisual(true, false);
+      const s = document.getElementById("robotStatusText");
+      if (s) s.textContent = `🔊 Gemini US (${appState.selectedVoice || "Orus"})`;
+      startRealTimeLipSync();
+      src.onended = () => { if (currentVoiceSource === src) { currentVoiceSource = null; stopLipSyncLoop(); setSpeakingVisual(false, false); } if (tok === speechRequestCounter && onDone) onDone(); };
+      src.start(ctx.currentTime + 0.04);
+    } catch (e) { currentVoiceSource = null; stopLipSyncLoop(); setSpeakingVisual(false, false); if (onDone) onDone(); }
+  };
+
+  const TTS_MODELS = ["gemini-3.8-flash-lite-tts", "gemini-3.8-flash-tts", "gemini-2.5-flash-preview-tts"];
+
+  function makePayload(model, text, langCode, style) {
+    const voiceName = appState.selectedVoice || "Orus", jp = langCode === "ja-JP";
+    if (model.startsWith("gemini-3.8")) {
+      const styleDesc = jp ? "warm, friendly, clear native Japanese teacher for a 6-year-old"
+        : style === "hype" ? "warm, charismatic, joyful American English male teacher, clear pacing"
+        : style === "silly" ? "playful, funny American English male teacher, slow and clear"
+        : appState.speechSlow ? "smooth, warm, calm American English male teacher, slow and clear for a 6-year-old"
+        : "smooth, warm, charismatic American English male teacher, relaxed pace";
+      return { contents: [{ role: "user", parts: [{ text, speechMetadata: { style: styleDesc } }] }], generationConfig: { responseModalities: ["AUDIO"], speechConfig: { languageCode: langCode, voiceConfig: { prebuiltVoiceConfig: { voiceName } } } } };
+    }
+    const dir = jp ? "Say warmly in Japanese: " : appState.speechSlow ? "Say slowly and warmly like a friendly American teacher from California: " : "Say warmly and cheerfully like a friendly American teacher from California: ";
+    return { contents: [{ parts: [{ text: dir + text }] }], generationConfig: { responseModalities: ["AUDIO"], speechConfig: { languageCode: langCode, voiceConfig: { prebuiltVoiceConfig: { voiceName } } } } };
+  }
+
+  async function fetchGeminiVoice(text, langCode, style, signal) {
+    const key = rt ? rt.getKey() : ((typeof apiKey === "string" && apiKey.trim()) || (localStorage.getItem("robot_tkoi_gemini_apikey_v1") || "").trim());
+    if (!key) return null;
+    const ck = `v3|${appState.selectedVoice || "Orus"}|${langCode}|${appState.speechSlow ? "s" : "n"}|${style}|${text}`;
+    if (ttsAudioCache.has(ck)) return ttsAudioCache.get(ck);
+
+    const models = workingTts ? [workingTts, ...TTS_MODELS.filter(m => m !== workingTts)] : TTS_MODELS;
+    for (const model of models) {
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(key)}`;
+      try {
+        let res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, signal, body: JSON.stringify(makePayload(model, text, langCode, style)) });
+        if (res.status === 400) {
+          res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, signal, body: JSON.stringify({ contents: [{ parts: [{ text }] }], generationConfig: { responseModalities: ["AUDIO"], speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: appState.selectedVoice || "Orus" } } } } }) });
+        }
+        if (res.ok) {
+          const part = (await res.json())?.candidates?.[0]?.content?.parts?.find(p => p.inlineData?.data);
+          if (part) {
+            const buf = await decodeGeminiAudioToBuffer(part.inlineData.data, part.inlineData.mimeType);
+            if (buf) { workingTts = model; if (ttsAudioCache.size >= MAX_TTS_CACHE) ttsAudioCache.delete(ttsAudioCache.keys().next().value); ttsAudioCache.set(ck, buf); return buf; }
+          }
+        } else if (res.status === 401 || res.status === 403) break;
+      } catch (e) { if (e?.name === "AbortError") return "ABORTED"; }
+    }
+    return null;
+  }
+
+  function runQueue(segs, tok, onAllDone) {
+    const list = (segs || []).filter(s => s?.text?.trim());
+    if (!list.length) { if (onAllDone) onAllDone(); return; }
+    const step = async (i) => {
+      if (tok !== speechRequestCounter) return;
+      if (i >= list.length) { if (onAllDone) onAllDone(); return; }
+      const seg = list[i], nxt = list[i + 1], next = () => { if (tok === speechRequestCounter) step(i + 1); };
+      const useNeural = rt ? (rt.getMode() === "neural" && !!rt.getKey()) : false;
+      if (!useNeural) { speakCleanLocal(seg.text, seg.lang, tok, next); return; }
+      if (nxt) fetchGeminiVoice(nxt.text, nxt.lang, nxt.style, undefined);
+      const ac = new AbortController(); if (rt) rt.setAbort(ac); setAntennaLoading(true);
+      const buf = await fetchGeminiVoice(seg.text, seg.lang, seg.style, ac.signal);
+      setAntennaLoading(false);
+      if (tok !== speechRequestCounter || buf === "ABORTED") return;
+      if (buf) playAudioBufferWithLipSync(buf, tok, next);
+      else speakCleanLocal(seg.text, seg.lang, tok, next);
+    };
+    step(0);
+  }
+
+  window.speakRealVoice = async (text, { lang = "en-US", style = "normal", onDone = null } = {}) => {
+    const jp = (lang || "").toLowerCase().startsWith("ja") || isJp(text);
+    const clean = jp ? (text || "").trim() : cleanEn(text);
+    if (!clean) { if (onDone) onDone(); return; }
+    stopAllSpeech();
+    runQueue([{ text: clean, lang: jp ? "ja-JP" : "en-US", style: jp ? "jp" : style }], speechRequestCounter, onDone);
+  };
+  window.speakBilingual = async (en, jp = "", incJp = false, style = "normal", onDone = null) => {
+    const cEn = cleanEn(en), cJp = (jp || "").trim(); stopAllSpeech();
+    const segs = [];
+    if (cEn) segs.push({ text: cEn, lang: "en-US", style });
+    if ((incJp || !cEn) && cJp && appState.showJapanese) segs.push({ text: cJp, lang: "ja-JP", style: "jp" });
+    runQueue(segs, speechRequestCounter, onDone);
+  };
+  if (rt) {
+    rt.speakLocal = speakCleanLocal;
+    rt.prefetchTts = (t, st = "normal") => { const jp = isJp(t); return fetchGeminiVoice(jp ? (t || "").trim() : cleanEn(t), jp ? "ja-JP" : "en-US", jp ? "jp" : st, undefined); };
+  }
+  window.speakBrowserFallback = (text, lang, onDone) => speakCleanLocal(text, lang, speechRequestCounter, onDone);
+})();
+</script>
 </body>
 </html>
